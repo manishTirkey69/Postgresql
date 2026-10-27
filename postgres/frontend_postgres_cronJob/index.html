@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PostgreSQL scheduled jobs</title>
+    <style>
+      :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172033; background: #f3f6fb; }
+      body { max-width: 1050px; margin: 0 auto; padding: 2rem 1rem; }
+      header, section { background: white; border: 1px solid #dce3ee; border-radius: 14px; padding: 1.25rem; margin: 1rem 0; }
+      h1, h2 { margin-top: 0; }
+      form { display: flex; gap: .6rem; flex-wrap: wrap; }
+      input, select, button { font: inherit; padding: .65rem .8rem; border-radius: 8px; border: 1px solid #b8c4d6; }
+      input { flex: 1; min-width: 200px; }
+      button { background: #175cd3; color: white; border: 0; cursor: pointer; }
+      button.danger { background: #b42318; }
+      button:disabled { opacity: .6; cursor: wait; }
+      #status { color: #526078; }
+      .row { border-top: 1px solid #e6ebf2; padding: .8rem 0; overflow-wrap: anywhere; }
+      .row:first-child { border-top: 0; }
+      code { background: #eef2f7; padding: .15rem .35rem; border-radius: 4px; }
+      small { color: #59677d; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>PostgreSQL scheduled jobs</h1>
+      <p>Inspect <code>pg_cron</code> schedules and their execution history.</p>
+      <p id="status" role="status">Loading schedule…</p>
+    </header>
+    <section>
+      <h2>Schedule a heartbeat</h2>
+      <p>This dashboard runs only the lesson's fixed SQL action; it does not accept arbitrary SQL.</p>
+      <form id="schedule-form">
+        <input id="job-name" maxlength="48" value="demo-heartbeat" required aria-label="Job name" />
+        <select id="frequency" aria-label="Frequency">
+          <option value="every_minute">Every minute</option>
+          <option value="every_five_minutes">Every five minutes</option>
+          <option value="hourly">Hourly</option>
+        </select>
+        <button id="schedule-button" type="submit">Schedule</button>
+      </form>
+    </section>
+    <section>
+      <h2>Scheduled jobs</h2>
+      <div id="job-list"></div>
+    </section>
+    <section>
+      <h2>Recent executions</h2>
+      <div id="run-list"></div>
+    </section>
+    <script>
+      const status = document.querySelector("#status");
+      const jobList = document.querySelector("#job-list");
+      const runList = document.querySelector("#run-list");
+
+      function displayRows(container, rows, renderer, emptyMessage) {
+        container.replaceChildren();
+        if (!rows.length) {
+          container.textContent = emptyMessage;
+          return;
+        }
+        for (const row of rows) container.append(renderer(row));
+      }
+
+      async function loadDashboard() {
+        try {
+          const [jobResponse, runResponse] = await Promise.all([
+            fetch("/api/cron/jobs"),
+            fetch("/api/cron/runs"),
+          ]);
+          if (!jobResponse.ok || !runResponse.ok) throw new Error("Could not load cron data");
+          const [jobs, runs] = await Promise.all([jobResponse.json(), runResponse.json()]);
+          displayRows(jobList, jobs, (job) => {
+            const row = document.createElement("div");
+            row.className = "row";
+            const content = document.createElement("div");
+            content.textContent = `${job.jobname ?? "(unnamed)"} · ${job.schedule} · ${job.active ? "active" : "inactive"}`;
+            const command = document.createElement("small");
+            command.textContent = job.command;
+            const remove = document.createElement("button");
+            remove.className = "danger";
+            remove.textContent = "Unschedule";
+            remove.addEventListener("click", async () => {
+              if (!confirm(`Unschedule ${job.jobname ?? `job ${job.jobid}`}?`)) return;
+              try {
+                const response = await fetch(`/api/cron/jobs/${job.jobid}`, { method: "DELETE" });
+                const body = await response.json();
+                if (!response.ok) throw new Error(body.detail ?? `HTTP ${response.status}`);
+                await loadDashboard();
+              } catch (error) {
+                status.textContent = `Could not unschedule job: ${error.message}`;
+              }
+            });
+            row.append(content, command, document.createElement("br"), remove);
+            return row;
+          }, "No scheduled jobs.");
+          displayRows(runList, runs, (run) => {
+            const row = document.createElement("div");
+            row.className = "row";
+            row.textContent = `Job ${run.jobid} · run ${run.runid} · ${run.status} · ${run.start_time ?? "no start time"}${run.return_message ? ` · ${run.return_message}` : ""}`;
+            return row;
+          }, "No executions recorded yet. Refresh after a scheduled time.");
+          status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        } catch (error) {
+          status.textContent = `Could not load dashboard: ${error.message}`;
+        }
+      }
+
+      document.querySelector("#schedule-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = document.querySelector("#schedule-button");
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/cron/jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              job_name: document.querySelector("#job-name").value,
+              frequency: document.querySelector("#frequency").value,
+            }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.detail ?? `HTTP ${response.status}`);
+          status.textContent = `Scheduled ${body.job_name} (${body.schedule}).`;
+          await loadDashboard();
+        } catch (error) {
+          status.textContent = `Could not schedule job: ${error.message}`;
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      loadDashboard();
+      setInterval(loadDashboard, 10000);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PostgreSQL job queue</title>
+    <style>
+      :root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; color: #172033; background: #f3f6fb; }
+      body { max-width: 980px; margin: 0 auto; padding: 2rem 1rem; }
+      header, section { background: white; border: 1px solid #dce3ee; border-radius: 14px; padding: 1.25rem; margin: 1rem 0; }
+      h1, h2 { margin-top: 0; }
+      form { display: flex; gap: .6rem; flex-wrap: wrap; }
+      input, button { font: inherit; padding: .65rem .8rem; border-radius: 8px; border: 1px solid #b8c4d6; }
+      input { flex: 1; min-width: 220px; }
+      button { background: #175cd3; color: white; border: 0; cursor: pointer; }
+      button:disabled { opacity: .6; cursor: wait; }
+      #status { color: #526078; }
+      #stats { display: flex; gap: .5rem; flex-wrap: wrap; }
+      #stats span, .badge { background: #eaf0fa; border-radius: 999px; padding: .2rem .65rem; }
+      article { border-top: 1px solid #e6ebf2; padding: .85rem 0; overflow-wrap: anywhere; }
+      article:first-child { border-top: 0; }
+      pre { white-space: pre-wrap; margin-bottom: 0; }
+      small { color: #59677d; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>PostgreSQL job queue</h1>
+      <p>Submit an inventory check, then watch PostgreSQL-backed worker status.</p>
+      <p id="status" role="status">Loading queue…</p>
+      <div id="stats" aria-label="Queue counts"></div>
+    </header>
+    <section>
+      <h2>Enqueue an inventory check</h2>
+      <form id="job-form">
+        <input id="sku" value="book-api" maxlength="64" required aria-label="SKU" />
+        <button id="submit" type="submit">Add job</button>
+      </form>
+      <p><small>A worker and the Inventory API must be running for queued jobs to complete.</small></p>
+    </section>
+    <section>
+      <h2>Recent jobs</h2>
+      <div id="jobs"></div>
+    </section>
+    <script>
+      const status = document.querySelector("#status");
+      const stats = document.querySelector("#stats");
+      const jobs = document.querySelector("#jobs");
+      const form = document.querySelector("#job-form");
+      const submit = document.querySelector("#submit");
+
+      async function loadQueue() {
+        try {
+          const [statsResponse, jobsResponse] = await Promise.all([
+            fetch("/queue/stats"),
+            fetch("/jobs?limit=30"),
+          ]);
+          if (!statsResponse.ok || !jobsResponse.ok) throw new Error("Queue API request failed");
+          const statsBody = await statsResponse.json();
+          const jobsBody = await jobsResponse.json();
+          stats.replaceChildren(...Object.entries(statsBody.jobs_by_status).map(([name, count]) => {
+            const item = document.createElement("span");
+            item.textContent = `${name}: ${count}`;
+            return item;
+          }));
+          jobs.replaceChildren(...jobsBody.map((job) => {
+            const article = document.createElement("article");
+            const heading = document.createElement("strong");
+            heading.textContent = `${job.payload.sku} — ${job.status}`;
+            const detail = document.createElement("small");
+            detail.textContent = ` · ${job.job_id} · attempts ${job.attempts}/${job.max_attempts} · ${job.created_at}`;
+            article.append(heading, detail);
+            if (job.result) {
+              const result = document.createElement("pre");
+              result.textContent = JSON.stringify(job.result, null, 2);
+              article.append(result);
+            }
+            if (job.last_error) {
+              const error = document.createElement("pre");
+              error.textContent = job.last_error;
+              article.append(error);
+            }
+            return article;
+          }));
+          status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        } catch (error) {
+          status.textContent = `Could not load queue: ${error.message}`;
+        }
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submit.disabled = true;
+        status.textContent = "Submitting job…";
+        try {
+          const response = await fetch("/jobs", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": crypto.randomUUID(),
+            },
+            body: JSON.stringify({ sku: document.querySelector("#sku").value }),
+          });
+          const body = await response.json();
+          if (!response.ok) throw new Error(body.detail ?? `HTTP ${response.status}`);
+          status.textContent = body.duplicate ? "Existing idempotent job returned." : "Job added.";
+          await loadQueue();
+        } catch (error) {
+          status.textContent = `Could not enqueue job: ${error.message}`;
+        } finally {
+          submit.disabled = false;
+        }
+      });
+
+      loadQueue();
+      setInterval(loadQueue, 3000);
+    </script>
+  </body>
+</html>

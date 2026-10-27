@@ -1,0 +1,36 @@
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_DB: cron_lab
+      POSTGRES_USER: cron_lab
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-change-me}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_cron
+      - -c
+      - cron.database_name=cron_lab
+      - -c
+      - cron.timezone=UTC
+      - -c
+      - cron.use_background_workers=on
+    ports:
+      - "127.0.0.1:5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cron_lab -d cron_lab"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - cron_job_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./demo.sql:/docker-entrypoint-initdb.d/02-demo.sql:ro
+      - ./inspect.sql:/docker-entrypoint-initdb.d/03-inspect.sql:ro
+    restart: unless-stopped
+
+volumes:
+  cron_job_data:
